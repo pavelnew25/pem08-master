@@ -1,0 +1,19 @@
+# Локальные файлы
+history.json
+*.exe
+dist/
+build/
+*.spec
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+*.spec
+.env

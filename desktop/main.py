@@ -1,5 +1,5 @@
 """
-Мониторинг конкурентов - Desktop приложение на PyQt6
+Мониторинг конкурентов - Desktop приложение на PyQt6 (Standalone)
 """
 import sys
 import os
@@ -8,17 +8,17 @@ from datetime import datetime
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QTextEdit, QLineEdit, QFrame, QScrollArea,
-    QFileDialog, QStackedWidget, QSplitter, QMessageBox, QProgressBar
+    QFileDialog, QStackedWidget, QMessageBox, QProgressBar
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize
-from PyQt6.QtGui import QPixmap, QFont, QIcon, QDragEnterEvent, QDropEvent
-
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSettings
+from PyQt6.QtGui import QPixmap, QDragEnterEvent, QDropEvent
 from styles import DARK_THEME
-from api_client import api_client
-
+from gemini_client import GeminiClient
+from parser import WebParser
+import json
 
 class WorkerThread(QThread):
-    """Поток для выполнения API запросов"""
+    """Поток для выполнения долгих операций"""
     finished = pyqtSignal(dict)
     error = pyqtSignal(str)
     
@@ -34,7 +34,6 @@ class WorkerThread(QThread):
             self.finished.emit(result)
         except Exception as e:
             self.error.emit(str(e))
-
 
 class DropZone(QFrame):
     """Зона для drag & drop изображений"""
@@ -100,8 +99,6 @@ class DropZone(QFrame):
     
     def set_file(self, file_path: str):
         self.selected_file = file_path
-        
-        # Показываем превью
         pixmap = QPixmap(file_path)
         if not pixmap.isNull():
             pixmap = pixmap.scaled(300, 200, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
@@ -110,8 +107,7 @@ class DropZone(QFrame):
             self.icon_label.hide()
             self.text_label.setText(Path(file_path).name)
             self.hint_label.setText("Нажмите для замены")
-        
-        self.fileDropped.emit(file_path)
+            self.fileDropped.emit(file_path)
     
     def clear(self):
         self.selected_file = None
@@ -119,7 +115,6 @@ class DropZone(QFrame):
         self.icon_label.show()
         self.text_label.setText("Перетащите изображение или нажмите для выбора")
         self.hint_label.setText("PNG, JPG, GIF, WEBP до 10MB")
-
 
 class ResultBlock(QFrame):
     """Блок результата анализа"""
@@ -140,7 +135,6 @@ class ResultBlock(QFrame):
             item_label.setStyleSheet("color: #94a3b8; margin-left: 8px; line-height: 1.5;")
             layout.addWidget(item_label)
 
-
 class MainWindow(QMainWindow):
     """Главное окно приложения"""
     
@@ -153,26 +147,32 @@ class MainWindow(QMainWindow):
         # Применяем стили
         self.setStyleSheet(DARK_THEME)
         
+        # Настройки
+        self.settings = QSettings("CompetitorAI", "Settings")
+        
+        # Инициализируем клиенты
+        self.gemini_client = None
+        self.parser = WebParser()
+        self.current_worker = None
+        
+        # История (локально в JSON)
+        self.history_file = Path("history.json")
+        self.history = self.load_history()
+        
         # Главный виджет
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         
-        # Главный layout
         main_layout = QHBoxLayout(central_widget)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
         
-        # Sidebar
+        # Sidebar и Content
         self.setup_sidebar(main_layout)
-        
-        # Content area
         self.setup_content(main_layout)
         
-        # Текущий worker
-        self.current_worker = None
-        
-        # Проверяем подключение к серверу
-        self.check_server_connection()
+        # Проверяем API ключ
+        self.check_api_key()
     
     def setup_sidebar(self, parent_layout):
         """Создание боковой панели"""
@@ -200,7 +200,8 @@ class MainWindow(QMainWindow):
             ("📝 Анализ текста", 0),
             ("🖼️ Анализ изображений", 1),
             ("🌐 Парсинг сайта", 2),
-            ("📋 История", 3)
+            ("📋 История", 3),
+            ("⚙️ Настройки", 4)
         ]
         
         for text, index in nav_items:
@@ -212,11 +213,10 @@ class MainWindow(QMainWindow):
             self.nav_buttons.append(btn)
         
         self.nav_buttons[0].setChecked(True)
-        
         nav_layout.addStretch()
         
         # Status
-        self.status_label = QLabel("● Проверка подключения...")
+        self.status_label = QLabel("● Проверка API ключа...")
         self.status_label.setStyleSheet("color: #f59e0b; padding: 16px;")
         nav_layout.addWidget(self.status_label)
         
@@ -236,7 +236,6 @@ class MainWindow(QMainWindow):
         
         title = QLabel("Мониторинг конкурентов")
         title.setObjectName("title")
-        
         subtitle = QLabel("AI-ассистент для анализа конкурентной среды")
         subtitle.setObjectName("subtitle")
         
@@ -246,12 +245,11 @@ class MainWindow(QMainWindow):
         
         # Stacked widget для вкладок
         self.stacked_widget = QStackedWidget()
-        
-        # Добавляем вкладки
         self.stacked_widget.addWidget(self.create_text_tab())
         self.stacked_widget.addWidget(self.create_image_tab())
         self.stacked_widget.addWidget(self.create_parse_tab())
         self.stacked_widget.addWidget(self.create_history_tab())
+        self.stacked_widget.addWidget(self.create_settings_tab())
         
         content_layout.addWidget(self.stacked_widget)
         
@@ -263,7 +261,6 @@ class MainWindow(QMainWindow):
         self.results_widget = QWidget()
         self.results_layout = QVBoxLayout(self.results_widget)
         self.results_scroll.setWidget(self.results_widget)
-        
         content_layout.addWidget(self.results_scroll)
         
         # Loading indicator
@@ -272,7 +269,7 @@ class MainWindow(QMainWindow):
         loading_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
         self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 0)  # Indeterminate
+        self.progress_bar.setRange(0, 0)
         self.progress_bar.setFixedWidth(300)
         
         self.loading_label = QLabel("Анализирую данные...")
@@ -281,10 +278,9 @@ class MainWindow(QMainWindow):
         
         loading_layout.addWidget(self.progress_bar, alignment=Qt.AlignmentFlag.AlignCenter)
         loading_layout.addWidget(self.loading_label)
-        
         self.loading_widget.hide()
-        content_layout.addWidget(self.loading_widget)
         
+        content_layout.addWidget(self.loading_widget)
         parent_layout.addWidget(content_widget)
     
     def create_text_tab(self) -> QWidget:
@@ -292,7 +288,6 @@ class MainWindow(QMainWindow):
         widget = QWidget()
         layout = QVBoxLayout(widget)
         
-        # Card
         card = QFrame()
         card.setObjectName("card")
         card_layout = QVBoxLayout(card)
@@ -321,7 +316,6 @@ class MainWindow(QMainWindow):
         
         layout.addWidget(card)
         layout.addStretch()
-        
         return widget
     
     def create_image_tab(self) -> QWidget:
@@ -329,7 +323,6 @@ class MainWindow(QMainWindow):
         widget = QWidget()
         layout = QVBoxLayout(widget)
         
-        # Card
         card = QFrame()
         card.setObjectName("card")
         card_layout = QVBoxLayout(card)
@@ -356,7 +349,6 @@ class MainWindow(QMainWindow):
         
         layout.addWidget(card)
         layout.addStretch()
-        
         return widget
     
     def create_parse_tab(self) -> QWidget:
@@ -364,7 +356,6 @@ class MainWindow(QMainWindow):
         widget = QWidget()
         layout = QVBoxLayout(widget)
         
-        # Card
         card = QFrame()
         card.setObjectName("card")
         card_layout = QVBoxLayout(card)
@@ -376,9 +367,7 @@ class MainWindow(QMainWindow):
         desc = QLabel("Введите URL сайта для автоматического извлечения и анализа контента")
         desc.setObjectName("cardDescription")
         
-        # URL input
         url_layout = QHBoxLayout()
-        
         prefix = QLabel("https://")
         prefix.setStyleSheet("background-color: #243049; padding: 12px 16px; border-radius: 8px 0 0 8px; color: #64748b;")
         
@@ -402,7 +391,6 @@ class MainWindow(QMainWindow):
         
         layout.addWidget(card)
         layout.addStretch()
-        
         return widget
     
     def create_history_tab(self) -> QWidget:
@@ -410,9 +398,7 @@ class MainWindow(QMainWindow):
         widget = QWidget()
         layout = QVBoxLayout(widget)
         
-        # Header with clear button
         header = QHBoxLayout()
-        
         title = QLabel("История запросов")
         title.setObjectName("cardTitle")
         
@@ -423,21 +409,139 @@ class MainWindow(QMainWindow):
         header.addWidget(title)
         header.addStretch()
         header.addWidget(self.clear_history_btn)
-        
         layout.addLayout(header)
         
-        # History scroll area
         self.history_scroll = QScrollArea()
         self.history_scroll.setWidgetResizable(True)
         
         self.history_widget = QWidget()
         self.history_layout = QVBoxLayout(self.history_widget)
         self.history_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        
         self.history_scroll.setWidget(self.history_widget)
-        layout.addWidget(self.history_scroll)
         
+        layout.addWidget(self.history_scroll)
         return widget
+    
+    def create_settings_tab(self) -> QWidget:
+        """Вкладка настроек"""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        
+        card = QFrame()
+        card.setObjectName("card")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(24, 24, 24, 24)
+        
+        title = QLabel("⚙️ Настройки")
+        title.setObjectName("cardTitle")
+        
+        desc = QLabel("Настройте Google Gemini API для работы приложения")
+        desc.setObjectName("cardDescription")
+        
+        card_layout.addWidget(title)
+        card_layout.addWidget(desc)
+        card_layout.addSpacing(24)
+        
+        # API Key
+        api_label = QLabel("Google Gemini API Key:")
+        api_label.setStyleSheet("color: #f1f5f9; font-weight: 600; font-size: 14px;")
+        
+        api_layout = QHBoxLayout()
+        self.api_key_input = QLineEdit()
+        self.api_key_input.setPlaceholderText("AIza...")
+        self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        
+        # Загружаем сохранённый ключ
+        saved_key = self.settings.value("gemini_api_key", "")
+        if saved_key:
+            self.api_key_input.setText(saved_key)
+        
+        self.show_key_btn = QPushButton("👁️")
+        self.show_key_btn.setObjectName("secondaryButton")
+        self.show_key_btn.setFixedWidth(50)
+        self.show_key_btn.clicked.connect(self.toggle_key_visibility)
+        
+        api_layout.addWidget(self.api_key_input)
+        api_layout.addWidget(self.show_key_btn)
+        
+        # Ссылка на получение ключа
+        help_label = QLabel('<a href="https://aistudio.google.com/apikey" style="color: #22d3ee;">Получить бесплатный API ключ →</a>')
+        help_label.setOpenExternalLinks(True)
+        help_label.setStyleSheet("font-size: 13px; margin-top: 8px;")
+        
+        # Кнопка сохранения
+        self.save_settings_btn = QPushButton("💾 Сохранить настройки")
+        self.save_settings_btn.setObjectName("primaryButton")
+        self.save_settings_btn.clicked.connect(self.save_settings)
+        
+        card_layout.addWidget(api_label)
+        card_layout.addLayout(api_layout)
+        card_layout.addWidget(help_label)
+        card_layout.addSpacing(24)
+        card_layout.addWidget(self.save_settings_btn)
+        
+        layout.addWidget(card)
+        layout.addStretch()
+        return widget
+    
+    def toggle_key_visibility(self):
+        """Показать/скрыть API ключ"""
+        if self.api_key_input.echoMode() == QLineEdit.EchoMode.Password:
+            self.api_key_input.setEchoMode(QLineEdit.EchoMode.Normal)
+            self.show_key_btn.setText("🙈")
+        else:
+            self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+            self.show_key_btn.setText("👁️")
+    
+    def save_settings(self):
+        """Сохранение настроек"""
+        api_key = self.api_key_input.text().strip()
+        
+        if not api_key:
+            QMessageBox.warning(self, "Ошибка", "Введите API ключ!")
+            return
+        
+        # Сохраняем в QSettings
+        self.settings.setValue("gemini_api_key", api_key)
+        
+        # Инициализируем клиент
+        try:
+            self.gemini_client = GeminiClient(api_key)
+            self.status_label.setText("● Gemini 2.0 активен")
+            self.status_label.setStyleSheet("color: #10b981; padding: 16px;")
+            QMessageBox.information(self, "Успех", "Настройки сохранены!\n\nGemini API подключён.")
+        except Exception as e:
+            self.status_label.setText("● Ошибка API")
+            self.status_label.setStyleSheet("color: #ef4444; padding: 16px;")
+            QMessageBox.critical(self, "Ошибка", f"Не удалось подключиться:\n{str(e)}")
+    
+    def check_api_key(self):
+        """Проверка наличия API ключа"""
+        api_key = self.settings.value("gemini_api_key", "")
+        
+        if api_key:
+            try:
+                self.gemini_client = GeminiClient(api_key)
+                self.status_label.setText("● Gemini 2.0 активен")
+                self.status_label.setStyleSheet("color: #10b981; padding: 16px;")
+            except Exception as e:
+                self.status_label.setText("● Ошибка API")
+                self.status_label.setStyleSheet("color: #ef4444; padding: 16px;")
+                QMessageBox.warning(
+                    self,
+                    "Ошибка API",
+                    f"Не удалось подключиться к Gemini:\n{str(e)}\n\nПерейдите в Настройки и проверьте API ключ."
+                )
+        else:
+            self.status_label.setText("● Нужен API ключ")
+            self.status_label.setStyleSheet("color: #f59e0b; padding: 16px;")
+            QMessageBox.information(
+                self,
+                "Настройка API",
+                "Добро пожаловать!\n\nДля работы нужен Google Gemini API ключ.\n\nПерейдите в Настройки → введите ключ."
+            )
+            # Автоматически открываем настройки
+            self.switch_tab(4)
     
     def switch_tab(self, index: int):
         """Переключение вкладок"""
@@ -447,171 +551,90 @@ class MainWindow(QMainWindow):
         self.stacked_widget.setCurrentIndex(index)
         self.results_scroll.hide()
         
-        # Загружаем историю при переключении на вкладку
+        # Загружаем историю при переключении
         if index == 3:
-            self.load_history()
-    
-    def check_server_connection(self):
-        """Проверка подключения к серверу"""
-        if api_client.check_health():
-            self.status_label.setText("● Система активна")
-            self.status_label.setStyleSheet("color: #10b981; padding: 16px;")
-        else:
-            self.status_label.setText("● Сервер недоступен")
-            self.status_label.setStyleSheet("color: #ef4444; padding: 16px;")
+            self.load_history_ui()
     
     def show_loading(self, message: str = "Анализирую данные..."):
         """Показать индикатор загрузки"""
         self.loading_label.setText(message)
         self.loading_widget.show()
         self.results_scroll.hide()
-        
-        # Отключаем кнопки
-        self.analyze_text_btn.setEnabled(False)
-        self.analyze_image_btn.setEnabled(False)
-        self.parse_btn.setEnabled(False)
     
     def hide_loading(self):
         """Скрыть индикатор загрузки"""
         self.loading_widget.hide()
-        
-        # Включаем кнопки
-        self.analyze_text_btn.setEnabled(True)
-        self.analyze_image_btn.setEnabled(True)
-        self.parse_btn.setEnabled(True)
     
-    def show_results(self, analysis: dict, result_type: str = "text"):
-        """Отображение результатов анализа"""
+    def show_results(self, analysis: dict, request_type: str):
+        """Показать результаты анализа"""
         # Очищаем предыдущие результаты
         while self.results_layout.count():
             child = self.results_layout.takeAt(0)
             if child.widget():
                 child.widget().deleteLater()
         
-        # Заголовок
-        title = QLabel("📊 Результаты анализа")
-        title.setObjectName("cardTitle")
-        title.setStyleSheet("font-size: 18px; margin-bottom: 16px;")
-        self.results_layout.addWidget(title)
+        # Сильные стороны
+        if analysis.get("strengths"):
+            block = ResultBlock("💪 Сильные стороны", analysis["strengths"])
+            self.results_layout.addWidget(block)
         
-        if result_type == "text" or result_type == "parse":
-            # Сильные стороны
-            if analysis.get("strengths"):
-                block = ResultBlock("✅ Сильные стороны", analysis["strengths"])
-                self.results_layout.addWidget(block)
-            
-            # Слабые стороны
-            if analysis.get("weaknesses"):
-                block = ResultBlock("⚠️ Слабые стороны", analysis["weaknesses"])
-                self.results_layout.addWidget(block)
-            
-            # Уникальные предложения
-            if analysis.get("unique_offers"):
-                block = ResultBlock("⭐ Уникальные предложения", analysis["unique_offers"])
-                self.results_layout.addWidget(block)
-            
-            # Рекомендации
-            if analysis.get("recommendations"):
-                block = ResultBlock("💡 Рекомендации", analysis["recommendations"])
-                self.results_layout.addWidget(block)
-            
-            # Резюме
-            if analysis.get("summary"):
-                summary_frame = QFrame()
-                summary_frame.setObjectName("resultBlock")
-                summary_frame.setStyleSheet("QFrame#resultBlock { background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 rgba(6, 182, 212, 0.1), stop:1 rgba(139, 92, 246, 0.1)); }")
-                summary_layout = QVBoxLayout(summary_frame)
-                
-                summary_title = QLabel("📝 Резюме")
-                summary_title.setObjectName("sectionTitle")
-                
-                summary_text = QLabel(analysis["summary"])
-                summary_text.setWordWrap(True)
-                summary_text.setStyleSheet("color: #f1f5f9; font-size: 15px; line-height: 1.6;")
-                
-                summary_layout.addWidget(summary_title)
-                summary_layout.addWidget(summary_text)
-                self.results_layout.addWidget(summary_frame)
+        # Слабые стороны
+        if analysis.get("weaknesses"):
+            block = ResultBlock("⚠️ Слабые стороны", analysis["weaknesses"])
+            self.results_layout.addWidget(block)
         
-        elif result_type == "image":
-            # Описание
-            if analysis.get("description"):
-                desc_frame = QFrame()
-                desc_frame.setObjectName("resultBlock")
-                desc_layout = QVBoxLayout(desc_frame)
-                
-                desc_title = QLabel("🖼️ Описание изображения")
-                desc_title.setObjectName("sectionTitle")
-                
-                desc_text = QLabel(analysis["description"])
-                desc_text.setWordWrap(True)
-                desc_text.setStyleSheet("color: #94a3b8;")
-                
-                desc_layout.addWidget(desc_title)
-                desc_layout.addWidget(desc_text)
-                self.results_layout.addWidget(desc_frame)
-            
-            # Оценка стиля
-            if "visual_style_score" in analysis:
-                score = analysis["visual_style_score"]
-                score_frame = QFrame()
-                score_frame.setObjectName("resultBlock")
-                score_layout = QVBoxLayout(score_frame)
-                
-                score_title = QLabel("⭐ Оценка визуального стиля")
-                score_title.setObjectName("sectionTitle")
-                
-                score_value = QLabel(f"{score}/10")
-                score_value.setStyleSheet("font-size: 32px; font-weight: bold; color: #22d3ee;")
-                
-                if analysis.get("visual_style_analysis"):
-                    score_desc = QLabel(analysis["visual_style_analysis"])
-                    score_desc.setWordWrap(True)
-                    score_desc.setStyleSheet("color: #94a3b8;")
-                    score_layout.addWidget(score_desc)
-                
-                score_layout.addWidget(score_title)
-                score_layout.addWidget(score_value)
-                self.results_layout.addWidget(score_frame)
-            
-            # Маркетинговые инсайты
-            if analysis.get("marketing_insights"):
-                block = ResultBlock("💡 Маркетинговые инсайты", analysis["marketing_insights"])
-                self.results_layout.addWidget(block)
-            
-            # Рекомендации
-            if analysis.get("recommendations"):
-                block = ResultBlock("📋 Рекомендации", analysis["recommendations"])
-                self.results_layout.addWidget(block)
+        # УТП
+        if analysis.get("unique_offers"):
+            block = ResultBlock("🎯 Уникальные предложения", analysis["unique_offers"])
+            self.results_layout.addWidget(block)
+        
+        # ЦА
+        if analysis.get("target_audience"):
+            block = ResultBlock("👥 Целевая аудитория", analysis["target_audience"])
+            self.results_layout.addWidget(block)
+        
+        # Маркетинговые инсайты
+        if analysis.get("marketing_insights"):
+            block = ResultBlock("💡 Маркетинговые инсайты", analysis["marketing_insights"])
+            self.results_layout.addWidget(block)
+        
+        # Рекомендации
+        if analysis.get("recommendations"):
+            block = ResultBlock("📋 Рекомендации", analysis["recommendations"])
+            self.results_layout.addWidget(block)
         
         self.results_layout.addStretch()
         self.results_scroll.show()
+        
+        # Сохраняем в историю
+        self.save_to_history(request_type, analysis)
     
     def show_error(self, message: str):
-        """Показать сообщение об ошибке"""
+        """Показать ошибку"""
         QMessageBox.critical(self, "Ошибка", message)
     
     # === API методы ===
     
     def analyze_text(self):
         """Анализ текста"""
-        text = self.text_input.toPlainText().strip()
+        if not self.gemini_client:
+            QMessageBox.warning(self, "Ошибка", "Настройте API ключ в разделе Настройки!")
+            return
         
+        text = self.text_input.toPlainText().strip()
         if len(text) < 10:
             self.show_error("Введите текст минимум 10 символов")
             return
         
-        self.show_loading("Анализирую текст...")
-        
-        self.current_worker = WorkerThread(api_client.analyze_text, text)
-        self.current_worker.finished.connect(self.on_text_analysis_complete)
+        self.show_loading("Анализирую текст через Gemini...")
+        self.current_worker = WorkerThread(self.gemini_client.analyze_text, text)
+        self.current_worker.finished.connect(self.on_text_complete)
         self.current_worker.error.connect(lambda e: self.on_error(e))
         self.current_worker.start()
     
-    def on_text_analysis_complete(self, result: dict):
+    def on_text_complete(self, result: dict):
         """Обработка результата анализа текста"""
         self.hide_loading()
-        
         if result.get("success") and result.get("analysis"):
             self.show_results(result["analysis"], "text")
         else:
@@ -619,21 +642,23 @@ class MainWindow(QMainWindow):
     
     def analyze_image(self):
         """Анализ изображения"""
+        if not self.gemini_client:
+            QMessageBox.warning(self, "Ошибка", "Настройте API ключ в разделе Настройки!")
+            return
+        
         if not self.drop_zone.selected_file:
             self.show_error("Выберите изображение для анализа")
             return
         
-        self.show_loading("Анализирую изображение...")
-        
-        self.current_worker = WorkerThread(api_client.analyze_image, self.drop_zone.selected_file)
-        self.current_worker.finished.connect(self.on_image_analysis_complete)
+        self.show_loading("Анализирую изображение через Gemini Vision...")
+        self.current_worker = WorkerThread(self.gemini_client.analyze_image, self.drop_zone.selected_file)
+        self.current_worker.finished.connect(self.on_image_complete)
         self.current_worker.error.connect(lambda e: self.on_error(e))
         self.current_worker.start()
     
-    def on_image_analysis_complete(self, result: dict):
+    def on_image_complete(self, result: dict):
         """Обработка результата анализа изображения"""
         self.hide_loading()
-        
         if result.get("success") and result.get("analysis"):
             self.show_results(result["analysis"], "image")
         else:
@@ -641,69 +666,102 @@ class MainWindow(QMainWindow):
     
     def parse_site(self):
         """Парсинг сайта"""
-        url = self.url_input.text().strip()
+        if not self.gemini_client:
+            QMessageBox.warning(self, "Ошибка", "Настройте API ключ в разделе Настройки!")
+            return
         
+        url = self.url_input.text().strip()
         if not url:
             self.show_error("Введите URL сайта")
             return
         
-        self.show_loading("Загружаю и анализирую сайт...")
-        
-        self.current_worker = WorkerThread(api_client.parse_demo, url)
+        self.show_loading("Парсинг сайта...")
+        self.current_worker = WorkerThread(self._parse_and_analyze, url)
         self.current_worker.finished.connect(self.on_parse_complete)
         self.current_worker.error.connect(lambda e: self.on_error(e))
         self.current_worker.start()
     
+    def _parse_and_analyze(self, url: str) -> dict:
+        """Парсинг + анализ"""
+        # Шаг 1: Парсим
+        parse_result = self.parser.parse_url(url)
+        if not parse_result.get("success"):
+            return parse_result
+        
+        # Шаг 2: Анализируем
+        analysis_result = self.gemini_client.analyze_parsed_content(
+            parse_result["title"],
+            parse_result["h1"],
+            parse_result["screenshot"]
+        )
+        
+        return analysis_result
+    
     def on_parse_complete(self, result: dict):
         """Обработка результата парсинга"""
         self.hide_loading()
-        
-        if result.get("success") and result.get("data"):
-            data = result["data"]
-            if data.get("analysis"):
-                self.show_results(data["analysis"], "parse")
-            else:
-                self.show_error("Не удалось проанализировать сайт")
+        if result.get("success") and result.get("analysis"):
+            self.show_results(result["analysis"], "parse")
         else:
             self.show_error(result.get("error", "Неизвестная ошибка"))
     
-    def load_history(self):
-        """Загрузка истории"""
-        result = api_client.get_history()
+    def on_error(self, error: str):
+        """Обработка ошибки"""
+        self.hide_loading()
+        self.show_error(error)
+    
+    # === История ===
+    
+    def load_history(self) -> list:
+        """Загрузка истории из JSON"""
+        if self.history_file.exists():
+            try:
+                with open(self.history_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except:
+                return []
+        return []
+    
+    def save_to_history(self, request_type: str, analysis: dict):
+        """Сохранение в историю"""
+        item = {
+            "timestamp": datetime.now().isoformat(),
+            "request_type": request_type,
+            "analysis": analysis
+        }
         
+        self.history.insert(0, item)
+        self.history = self.history[:10]  # Только последние 10
+        
+        with open(self.history_file, 'w', encoding='utf-8') as f:
+            json.dump(self.history, f, ensure_ascii=False, indent=2)
+    
+    def load_history_ui(self):
+        """Загрузка истории в UI"""
         # Очищаем
         while self.history_layout.count():
             child = self.history_layout.takeAt(0)
             if child.widget():
                 child.widget().deleteLater()
         
-        if result.get("items"):
-            for item in result["items"]:
+        if self.history:
+            for item in self.history:
                 frame = QFrame()
                 frame.setObjectName("historyItem")
                 layout = QHBoxLayout(frame)
                 
-                # Иконка
                 icons = {"text": "📝", "image": "🖼️", "parse": "🌐"}
                 icon = QLabel(icons.get(item.get("request_type", ""), "📄"))
                 icon.setStyleSheet("font-size: 24px;")
                 
-                # Контент
                 content = QWidget()
                 content_layout = QVBoxLayout(content)
                 content_layout.setContentsMargins(0, 0, 0, 0)
                 
                 type_labels = {"text": "Анализ текста", "image": "Анализ изображения", "parse": "Парсинг сайта"}
-                type_label = QLabel(type_labels.get(item.get("request_type", ""), item.get("request_type", "")))
+                type_label = QLabel(type_labels.get(item.get("request_type", ""), ""))
                 type_label.setStyleSheet("color: #22d3ee; font-size: 12px; font-weight: bold;")
                 
-                summary = QLabel(item.get("request_summary", "")[:60] + "...")
-                summary.setStyleSheet("color: #94a3b8;")
-                
-                content_layout.addWidget(type_label)
-                content_layout.addWidget(summary)
-                
-                # Время
                 timestamp = item.get("timestamp", "")
                 if timestamp:
                     try:
@@ -717,9 +775,11 @@ class MainWindow(QMainWindow):
                 time_label = QLabel(time_str)
                 time_label.setStyleSheet("color: #64748b; font-size: 12px;")
                 
+                content_layout.addWidget(type_label)
+                content_layout.addWidget(time_label)
+                
                 layout.addWidget(icon)
                 layout.addWidget(content, stretch=1)
-                layout.addWidget(time_label)
                 
                 self.history_layout.addWidget(frame)
         else:
@@ -740,25 +800,17 @@ class MainWindow(QMainWindow):
         )
         
         if reply == QMessageBox.StandardButton.Yes:
-            api_client.clear_history()
-            self.load_history()
-    
-    def on_error(self, error: str):
-        """Обработка ошибки"""
-        self.hide_loading()
-        self.show_error(error)
-
+            self.history = []
+            if self.history_file.exists():
+                self.history_file.unlink()
+            self.load_history_ui()
 
 def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-    
     window = MainWindow()
     window.show()
-    
     sys.exit(app.exec())
-
 
 if __name__ == "__main__":
     main()
-

@@ -1,114 +1,64 @@
 """
-Скрипт сборки .exe файла для Windows
+Скрипт для сборки desktop приложения в .exe
 """
-import os
+
+import PyInstaller.__main__
 import sys
-import subprocess
-import shutil
 from pathlib import Path
 
+print("=" * 60)
+print("🔨 СБОРКА DESKTOP ПРИЛОЖЕНИЯ")
+print("=" * 60)
+print()
 
-def build_exe():
-    """Собрать .exe файл"""
-    print("=" * 60)
-    print("🔨 СБОРКА DESKTOP ПРИЛОЖЕНИЯ")
-    print("=" * 60)
-    
-    # Текущая директория
-    current_dir = Path(__file__).parent
-    
-    # Проверяем наличие PyInstaller
-    print("\n📦 Проверка PyInstaller...")
-    try:
-        import PyInstaller
-        print(f"   ✓ PyInstaller {PyInstaller.__version__}")
-    except ImportError:
-        print("   ✗ PyInstaller не установлен")
-        print("   Установка: pip install pyinstaller")
-        sys.exit(1)
-    
-    # Имя приложения
-    app_name = "CompetitorMonitor"
-    
-    # Параметры PyInstaller
-    pyinstaller_args = [
-        "pyinstaller",
-        "--name", app_name,
-        "--onefile",           # Один .exe файл
-        "--windowed",          # Без консоли
-        "--noconfirm",         # Перезаписывать без подтверждения
-        "--clean",             # Очистить кеш
-        
-        # Иконка (если есть)
-        # "--icon", "icon.ico",
-        
-        # Добавляем файлы
-        "--add-data", f"styles.py{os.pathsep}.",
-        "--add-data", f"api_client.py{os.pathsep}.",
-        
-        # Скрытые импорты
-        "--hidden-import", "PyQt6",
-        "--hidden-import", "PyQt6.QtCore",
-        "--hidden-import", "PyQt6.QtWidgets",
-        "--hidden-import", "PyQt6.QtGui",
-        "--hidden-import", "requests",
-        
-        # Главный файл
-        "main.py"
-    ]
-    
-    print(f"\n🚀 Запуск сборки: {app_name}.exe")
-    print("-" * 60)
-    
-    # Запускаем PyInstaller
-    result = subprocess.run(pyinstaller_args, cwd=current_dir)
-    
-    if result.returncode == 0:
-        exe_path = current_dir / "dist" / f"{app_name}.exe"
-        
-        if exe_path.exists():
-            size_mb = exe_path.stat().st_size / (1024 * 1024)
-            print("\n" + "=" * 60)
-            print("✅ СБОРКА ЗАВЕРШЕНА УСПЕШНО!")
-            print("=" * 60)
-            print(f"\n📁 Файл: {exe_path}")
-            print(f"📊 Размер: {size_mb:.1f} MB")
-            print("\n💡 Для запуска:")
-            print(f"   1. Запустите backend: python run.py")
-            print(f"   2. Запустите {app_name}.exe")
-        else:
-            print("\n❌ Ошибка: .exe файл не найден")
-    else:
-        print("\n❌ Ошибка сборки")
-        sys.exit(1)
+# Проверяем PyInstaller
+try:
+    import PyInstaller
+    print(f"📦 Проверка PyInstaller...")
+    print(f"   ✓ PyInstaller {PyInstaller.__version__}")
+    print()
+except ImportError:
+    print("❌ PyInstaller не установлен!")
+    print("Установите: pip install pyinstaller")
+    sys.exit(1)
 
+# Параметры сборки
+app_name = "CompetitorMonitor"
+main_script = "main.py"
 
-def clean():
-    """Очистить артефакты сборки"""
-    current_dir = Path(__file__).parent
-    
-    dirs_to_remove = ["build", "dist", "__pycache__"]
-    files_to_remove = ["*.spec"]
-    
-    print("🧹 Очистка артефактов сборки...")
-    
-    for dir_name in dirs_to_remove:
-        dir_path = current_dir / dir_name
-        if dir_path.exists():
-            shutil.rmtree(dir_path)
-            print(f"   Удалено: {dir_name}/")
-    
-    for pattern in files_to_remove:
-        for file in current_dir.glob(pattern):
-            file.unlink()
-            print(f"   Удалено: {file.name}")
-    
-    print("✓ Очистка завершена")
+# Дополнительные файлы (только те что есть)
+datas = [
+    ('gemini_client.py', '.'),
+    ('parser.py', '.'),
+    ('styles.py', '.'),
+]
 
+# Скрытые импорты
+hidden_imports = [
+    'PyQt6.QtCore',
+    'PyQt6.QtGui',
+    'PyQt6.QtWidgets',
+    'google.generativeai',
+    'selenium',
+    'PIL',
+]
 
-if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "clean":
-        clean()
-    else:
-        build_exe()
+print(f"🚀 Запуск сборки: {app_name}.exe")
+print("-" * 60)
 
+# Запуск PyInstaller
+PyInstaller.__main__.run([
+    main_script,
+    f'--name={app_name}',
+    '--onefile',
+    '--windowed',
+    '--clean',
+    *[f'--add-data={src};{dst}' for src, dst in datas],
+    *[f'--hidden-import={imp}' for imp in hidden_imports],
+])
+
+print()
+print("=" * 60)
+print("✅ СБОРКА ЗАВЕРШЕНА")
+print(f"📁 Файл: dist/{app_name}.exe")
+print("=" * 60)
