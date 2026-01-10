@@ -6,7 +6,7 @@ MVP приложение для анализа конкурентной сред
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.104+-green.svg)
 ![Gemini](https://img.shields.io/badge/Google-Gemini%202.0-orange.svg)
 
-(screenshot1.png)
+![Скриншот приложения](screenshot1.png)
 
 ## 📋 Описание
 
